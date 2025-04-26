@@ -1,0 +1,933 @@
+---
+title: "mini-project-1-revised"
+format: html
+editor: visual
+author: Xinman (Yoyo) Liu
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(scales)
+library(caret)
+library(psych)
+library(corrplot)
+library(mclust)
+library(viridisLite)
+library(fields)
+library(ranger)
+library(glmnet)
+```
+
+```{r}
+set.seed(42)
+```
+
+# Part 1: Exploring and visualizing the data
+
+```{r}
+# set theme for consistent visualizations
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(
+      text = element_text(family = "Times New Roman"),
+      plot.title = element_text(family = "Times New Roman", face = "bold"),
+      axis.title = element_text(family = "Times New Roman"),
+      legend.title = element_text(family = "Times New Roman"),
+      legend.text = element_text(family = "Times New Roman"),
+      plot.caption = element_text(family = "Times New Roman")
+    )
+)
+```
+
+```{r}
+df <- read_csv("Psych Mini Project 1 Responses.csv")
+glimpse(df)
+```
+
+## Data Wrangling
+
+```{r}
+item_metrics <- df %>%
+  mutate(
+    question_length = str_count(question_text, "\\S+"),
+    # clean up graph types
+    graph_type = case_when(
+      # handle graph types in BRBF test
+      grepl("sp-table", graph_type) ~ "Table",
+      grepl("lg1-table", graph_type) ~ "Table",
+      grepl("bg-table", graph_type) ~ "Table",
+      grepl("^lg1", graph_type) ~ "Line",
+      grepl("^sp", graph_type) ~ "Scatter",
+      grepl("^bg", graph_type) ~ "Bar",
+      # merge Pie and Radial as Circular Charts
+      graph_type %in% c("Pie", "Radial") ~ "Circular",
+      # combine Stacked Area into Area
+      graph_type == "Stacked Area" ~ "Area",
+      # combine Stacked Bar into Bar
+      graph_type %in% c("Stacked Bar", "100% Stacked Bar") ~ "Bar",
+      # common graph types remain as they are
+      graph_type %in% c("Line", "Bar", "Area", "Scatter", "Table") ~ graph_type,
+      # all other niche graph types
+      TRUE ~ "Others"
+    )
+  ) %>%
+  group_by(item_id) %>%
+  summarize(
+    proportion_correct = mean(correct_response, na.rm = TRUE),
+    test_name = first(test_name),
+    graph_type = first(graph_type),
+    task_type_merged = first(task_type_merged),
+    misleading_item = first(misleading_item),
+    question_length = first(question_length)
+  )
+
+item_metrics <- item_metrics %>%
+  mutate(
+    # Create a new interaction column by combining graph type and task type
+    graph_task_interaction = paste0(graph_type, "_", task_type_merged)
+  )
+
+# save processed data
+write_csv(item_metrics, "item_performance_processed.csv")
+glimpse(item_metrics)
+```
+
+## Descriptive Stats and Visualization
+
+```{r}
+summary(item_metrics$proportion_correct)
+```
+
+```{r}
+# distribution of item performance
+ggplot(item_metrics, aes(x = proportion_correct)) +
+  geom_histogram(bins = 20, fill = "darkgrey", color = "white") +
+  labs(
+    title = "Distribution of Item Performance",
+    subtitle = "Proportion of Correct Responses Across All Items",
+    x = "Proportion Correct",
+    y = "Count"
+  ) +
+  scale_x_continuous(labels = percent_format()) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+```{r}
+# summary stats by test name
+test_summary <- item_metrics %>%
+  group_by(test_name) %>%
+  summarize(
+    count = n(),
+    mean_correct = mean(proportion_correct),
+    median_correct = median(proportion_correct),
+    sd_correct = sd(proportion_correct),
+    min_correct = min(proportion_correct),
+    max_correct = max(proportion_correct)
+  )
+
+print(test_summary)
+
+# visualize
+ggplot(item_metrics, aes(x = test_name, y = proportion_correct)) +
+  geom_violin(fill = "lightgrey", alpha = 0.7) +
+  geom_boxplot(width = 0.15, fill = "darkgrey", alpha = 0.8) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, 
+               fill = "white", color = "black") +
+  labs(
+    title = "Distribution of Item Performance by Test",
+    subtitle = "Combined Violin and Box Plot with Mean Points",
+    x = "Test Name",
+    y = "Proportion Correct"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+```{r}
+# summary stats by graph type
+graph_summary <- item_metrics %>%
+  group_by(graph_type) %>%
+  summarize(
+    count = n(),
+    mean_correct = mean(proportion_correct),
+    median_correct = median(proportion_correct),
+    sd_correct = sd(proportion_correct)
+  ) %>%
+  arrange(graph_type)
+
+print(graph_summary)
+
+# visualize
+ggplot(item_metrics, aes(x = reorder(graph_type, -proportion_correct), y = proportion_correct)) +
+  geom_boxplot(fill = "darkgrey", alpha = 0.7) +
+  labs(
+    title = "Distribution of Item Performance by Graph Type",
+    x = "Graph Type",
+    y = "Proportion Correct"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# summary stats by task type (merged)
+task_summary <- item_metrics %>%
+  group_by(task_type_merged) %>%
+  summarize(
+    count = n(),
+    mean_correct = mean(proportion_correct),
+    median_correct = median(proportion_correct),
+    sd_correct = sd(proportion_correct)
+  )
+
+print(task_summary)
+
+# visualize
+ggplot(item_metrics, aes(x = task_type_merged, y = proportion_correct)) +
+  geom_boxplot(fill = "darkgrey", alpha = 0.7) +
+  labs(
+    title = "Distribution of Item Performance by Task Type",
+    x = "Task Type",
+    y = "Proportion Correct"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+# heatmap of mean proportion correct by test and graph type
+heatmap_data <- item_metrics %>%
+  group_by(test_name, graph_type) %>%
+  summarize(mean_correct = mean(proportion_correct), count = n()) %>%
+  ungroup()
+
+ggplot(heatmap_data, aes(x = graph_type, y = test_name, fill = mean_correct)) +
+  geom_tile() +
+  # scale_fill_gradient(low = "white", high = "black") +
+  scale_fill_viridis_c(option = "magma", begin = 0.1) +
+  labs(
+    title = "Mean Proportion Correct by Test and Graph Type",
+    x = "Graph Type",
+    y = "Test Name",
+    fill = "Mean Proportion\nCorrect"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+# misleading vs non-misleading items
+misleading_summary <- item_metrics %>%
+  group_by(misleading_item) %>%
+  summarize(
+    count = n(),
+    mean_correct = mean(proportion_correct),
+    median_correct = median(proportion_correct),
+    sd_correct = sd(proportion_correct)
+  )
+
+print(misleading_summary)
+
+ggplot(item_metrics, aes(x = factor(misleading_item), y = proportion_correct)) +
+  geom_boxplot(fill = "darkgrey", alpha = 0.7) +
+  labs(
+    title = "Performance on Misleading vs. Non-misleading Items",
+    x = "Misleading Item",
+    y = "Proportion Correct"
+  ) +
+  scale_x_discrete(labels = c("FALSE" = "Non-misleading", "TRUE" = "Misleading")) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# Part 2: Unsupervised Learning
+
+## RQ1: What latent dimensions identified through factor analysis best explain the patterns in proportion correct across the five data visualization literacy assessments?
+
+### Factor Analysis
+
+```{r}
+# convert character columns to factors to represent categorical data
+item_metrics <- item_metrics %>%
+  mutate(across(where(is.character), as.factor))
+
+# create dummy variables for categorical variables
+categorical_vars <- c("test_name", "graph_type", "task_type_merged", "graph_task_interaction")
+
+create_dummies <- function(data, var_name) {
+  formula <- as.formula(paste0("~ ", var_name, " - 1"))
+  model_matrix <- model.matrix(formula, data)
+  as.data.frame(model_matrix)
+}
+
+dummy_list <- lapply(categorical_vars, function(var) create_dummies(item_metrics, var))
+dummy_df <- do.call(cbind, dummy_list)
+
+# add numeric variables
+fa_data <- cbind(
+  dummy_df,
+  question_length = scale(item_metrics$question_length),
+  misleading = as.numeric(item_metrics$misleading_item)
+)
+```
+
+```{r}
+# check for near-zero variance variables
+nzv <- nearZeroVar(fa_data)
+if (length(nzv) > 0) {
+  cat("Removing", length(nzv), "near-zero variance variables\n")
+  fa_data <- fa_data[, -nzv]
+}
+
+# correlation matrix
+cor_matrix <- cor(fa_data, use = "pairwise.complete.obs")
+
+eigen_values <- eigen(cor_matrix)$values
+if(min(eigen_values) <= 0) {
+  cor_matrix <- psych::cor.smooth(cor_matrix)
+}
+```
+
+```{r}
+# scree plot
+scree_data <- data.frame(
+  Component = 1:length(eigen_values),
+  Eigenvalue = eigen_values
+)
+
+scree_plot <- ggplot(scree_data, aes(x = Component, y = Eigenvalue)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(title = "Scree Plot for Factor Analysis") +
+  theme(plot.title = element_text(hjust = 0.5))
+print(scree_plot)
+```
+
+```{r}
+# conduct factor analysis with 5 factors (choosing only 5 factors to ensure interpretability)
+fa_result <- fa(cor_matrix, nfactors = 5, rotate = "varimax", fm = "ml", score = "regression")
+print(fa_result, cut = 0.3, sort = TRUE)
+print(fa_result$loadings, cutoff = 0.3)
+```
+
+```{r}
+# extract and name factor scores
+factor_scores <- as.data.frame(predict(fa_result, fa_data))
+names(factor_scores) <- paste0("Factor", 1:ncol(factor_scores))
+
+# add factor scores to original data
+item_metrics_with_factors <- cbind(item_metrics, factor_scores)
+
+# correlation between factors and proportion correct
+factor_cor_with_perf <- cor(item_metrics$proportion_correct, factor_scores)
+
+factor_correlations <- data.frame(
+  Factor = names(factor_scores),
+  Correlation = as.vector(factor_cor_with_perf)
+) %>%
+  arrange(desc(abs(Correlation)))
+
+print(factor_correlations)
+```
+
+```{r}
+# save factor analysis results
+saveRDS(fa_result, "fa_result.rds")
+saveRDS(factor_scores, "factor_scores.rds")
+# saveRDS(engineered_metrics_with_factors, "engineered_metrics_with_factors.rds")
+```
+
+## RQ2: How do test items cluster based on the identified latent dimensions, and what patterns in proportion correct emerge within and between these clusters?
+
+### GMM
+
+```{r}
+# apply GMM to factor scores
+# use BIC to let the system determine optimal number of clusters
+bic_values <- mclustBIC(factor_scores)
+plot(bic_values)
+```
+
+```{r}
+# best model info
+gmm_model <- Mclust(factor_scores, G=1:9)
+n_clusters <- gmm_model$G
+cluster_model_type <- gmm_model$modelName
+cat("Optimal number of clusters:", n_clusters, "\n")
+cat("Cluster model type:", cluster_model_type, "\n")
+
+summary(gmm_model)
+```
+
+```{r}
+# cluster assignments of data
+item_metrics_with_clusters <- item_metrics_with_factors %>%
+  mutate(
+    cluster = gmm_model$classification,
+    cluster = as.factor(cluster)
+  )
+
+# cluster characteristics
+cluster_profiles <- item_metrics_with_clusters %>%
+  group_by(cluster) %>%
+  summarize(
+    n_items = n(),
+    avg_proportion_correct = mean(proportion_correct),
+    std_dev = sd(proportion_correct),
+    min_proportion = min(proportion_correct),
+    max_proportion = max(proportion_correct)
+  )
+print(cluster_profiles)
+```
+
+```{r}
+# mean factor scores by cluster
+cluster_factor_means <- item_metrics_with_clusters %>%
+  group_by(cluster) %>%
+  summarize(across(starts_with("Factor"), mean))
+
+print(cluster_factor_means)
+```
+
+```{r}
+# convert to matrix and standardize to get z scores
+cluster_factor_matrix <- as.matrix(cluster_factor_means[, -1])
+rownames(cluster_factor_matrix) <- paste0("Cluster ", cluster_factor_means$cluster)
+
+cluster_factor_z <- scale(t(cluster_factor_matrix))
+```
+
+```{r}
+# cluster counts
+cluster_counts <- item_metrics_with_clusters %>%
+  group_by(cluster) %>%
+  summarize(count = n()) %>%
+  mutate(cluster_num = as.numeric(as.character(cluster)))
+
+# create heatmap
+heatmap_fields <- function(mat, cluster_counts) {
+  heatmapdf <- as.data.frame(mat) %>%
+    mutate(Factor = rownames(mat)) %>%
+    pivot_longer(-Factor, names_to = "Cluster", values_to = "Value") %>%
+    mutate(
+      Cluster_num = as.numeric(gsub("Cluster ", "", Cluster)),
+      Factor_num = as.numeric(gsub("Factor", "", Factor)),
+      Factor_label = paste0("Factor ", Factor_num)
+    )
+  
+  heatmapdf <- heatmapdf %>%
+    left_join(cluster_counts, by = c("Cluster_num" = "cluster_num"))
+  
+  unique_clusters <- sort(unique(heatmapdf$Cluster_num))
+  cluster_labels <- sapply(unique_clusters, function(c) {
+    count <- cluster_counts$count[cluster_counts$cluster_num == c]
+    if(length(count) == 0) count <- NA
+    paste0("Cluster ", c, " (n=", count, ")")
+  })
+  
+  ordered_factors <- unique(heatmapdf$Factor_label)[order(unique(heatmapdf$Factor_num))]
+  
+  ggplot(heatmapdf, aes(x = Factor_label, y = Cluster_num, fill = Value)) +
+    geom_tile(alpha = 0.9) +
+    scale_fill_viridis_c(option = "magma", begin = 0.1, name = "Z-score") +
+    geom_text(aes(label = sprintf("%.2f", Value), 
+                  color = ifelse(Value < 1.0, "white", "black")),
+              size = 3,
+              family = "Times New Roman",
+              fontface = "bold") +
+    scale_color_identity() +
+    scale_y_continuous(breaks = unique_clusters, 
+                       labels = cluster_labels) +
+    scale_x_discrete(limits = ordered_factors) +
+    labs(x = "Factor", 
+         y = "Cluster",
+         title = "Standardized Factor Scores by Cluster (Z-scores)") +
+    theme_minimal() +
+    theme(
+      aspect.ratio = 0.4,
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      axis.text.y = element_text(hjust = 1),
+      axis.text.x = element_text(angle = 0, hjust = 0.5),
+      text = element_text(family = "Times New Roman")
+    )
+}
+
+heatmap_fields(cluster_factor_z, cluster_counts)
+```
+
+```{r, fig.width=10, fig.height=4}
+# plot proportion correct by cluster
+ggplot(item_metrics_with_clusters, 
+      aes(x = cluster, y = proportion_correct, fill = cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Proportion of Correct Responses by Cluster",
+    x = "Cluster",
+    y = "Proportion Correct"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+# Part 3: Supervised Learning
+
+### Cross Validation
+
+```{r}
+# load the data with factors and clusters
+item_metrics_with_factors <- item_metrics_with_factors
+item_metrics_with_clusters <- item_metrics_with_factors
+item_metrics_with_clusters$cluster <- as.factor(gmm_model$classification)
+```
+
+```{r}
+# create cross-validation fold
+cv_folds <- createFolds(item_metrics_with_clusters$proportion_correct, k = 5, returnTrain = TRUE)
+```
+
+```{r}
+# cv function
+cv_performance <- function(model_formula, data, folds) {
+  cv_results <- data.frame(fold = integer(), rmse = numeric(), rsquared = numeric())
+  
+  for (i in seq_along(folds)) {
+    train_data <- data[folds[[i]], ]
+    valid_data <- data[-folds[[i]], ]
+    
+    model <- lm(model_formula, data = train_data)
+    predictions <- predict(model, newdata = valid_data)
+    
+    rmse <- sqrt(mean((valid_data$proportion_correct - predictions)^2, na.rm = TRUE))
+    rsq <- 1 - sum((valid_data$proportion_correct - predictions)^2, na.rm = TRUE) /
+           sum((valid_data$proportion_correct - mean(valid_data$proportion_correct))^2, na.rm = TRUE)
+    
+    cv_results <- rbind(cv_results, data.frame(fold = i, rmse = rmse, rsquared = rsq))
+  }
+  
+  result <- data.frame(
+    rmse = mean(cv_results$rmse),
+    rsquared = mean(cv_results$rsquared)
+  )
+  
+  cat("Model performance - RMSE:", round(result$rmse, 4),
+      "R²:", round(result$rsquared, 4), "\n")
+  
+  return(result)
+}
+```
+
+```{r}
+# linear regression (original features + factors + clusters)
+cv_performance_lm <- function(predictor_vars, target_var, data, folds) {
+  cv_results <- data.frame(fold = integer(), rmse = numeric(), rsquared = numeric())
+  
+  formula_text <- paste(target_var, "~", paste(predictor_vars, collapse = " + "))
+  
+  for (i in seq_along(folds)) {
+    train_data <- data[folds[[i]], ]
+    valid_data <- data[-folds[[i]], ]
+    
+    # Fit standard linear model
+    model <- lm(as.formula(formula_text), data = train_data)
+    
+    # Make predictions
+    predictions <- predict(model, newdata = valid_data)
+    
+    # Calculate metrics
+    y_valid <- valid_data[[target_var]]
+    rmse <- sqrt(mean((y_valid - predictions)^2))
+    
+    y_mean <- mean(y_valid)
+    ss_total <- sum((y_valid - y_mean)^2)
+    ss_residual <- sum((y_valid - predictions)^2)
+    
+    rsq <- 1 - ss_residual / ss_total
+    
+    cv_results <- rbind(cv_results, data.frame(fold = i, rmse = rmse, rsquared = rsq))
+  }
+  
+  # Return average performance
+  result <- data.frame(
+    rmse = mean(cv_results$rmse),
+    rsquared = mean(cv_results$rsquared)
+  )
+  
+  cat("Linear regression performance - RMSE:", round(result$rmse, 4),
+      "R²:", round(result$rsquared, 4), "\n")
+  
+  # Also fit a model on all data to see coefficients and p-values
+  full_model <- lm(as.formula(formula_text), data = data)
+  cat("\nModel summary:\n")
+  print(summary(full_model))
+  
+  return(result)
+}
+
+```
+
+```{r}
+# ridge (original features + factors + clusters)
+cv_performance_ridge <- function(predictor_vars, target_var, data, folds, alpha = 0) {
+  cv_results <- data.frame(fold = integer(), rmse = numeric(), rsquared = numeric())
+  
+  for (i in seq_along(folds)) {
+    train_data <- data[folds[[i]], ]
+    valid_data <- data[-folds[[i]], ]
+    
+    # model matrix for training data
+    formula_text <- paste("~", paste(predictor_vars, collapse = " + "))
+    x_train <- model.matrix(as.formula(formula_text), train_data)[,-1]
+    y_train <- train_data[[target_var]]
+    
+    # model matrix for validation data
+    x_valid <- model.matrix(as.formula(formula_text), valid_data)[,-1]
+    y_valid <- valid_data[[target_var]]
+    
+    # tune lambda parameter
+    cv_model <- cv.glmnet(x_train, y_train, alpha = alpha)
+    best_lambda <- cv_model$lambda.min
+    
+    # fit model
+    model <- glmnet(x_train, y_train, alpha = alpha, lambda = best_lambda)
+    
+    # Make predictions
+    predictions <- predict(model, newx = x_valid, s = best_lambda)
+    
+    # calculate metrics
+    rmse <- sqrt(mean((y_valid - predictions)^2))
+    y_mean <- mean(y_valid)
+    ss_total <- sum((y_valid - y_mean)^2)
+    ss_residual <- sum((y_valid - predictions)^2)
+    
+    rsq <- 1 - ss_residual / ss_total
+    
+    cv_results <- rbind(cv_results, data.frame(fold = i, rmse = rmse, rsquared = rsq))
+  }
+  
+  # return avg performance
+  result <- data.frame(
+    rmse = mean(cv_results$rmse),
+    rsquared = mean(cv_results$rsquared)
+  )
+  
+  cat("Ridge regression performance - RMSE:", round(result$rmse, 4),
+      "R²:", round(result$rsquared, 4), "\n")
+  
+  return(result)
+}
+```
+
+```{r}
+# random forest (original features + factors + clusters)
+cv_performance_rf <- function(formula, data, folds, ntree = 500) {
+  cv_results <- data.frame(fold = integer(), rmse = numeric(), rsquared = numeric())
+  
+  for (i in seq_along(folds)) {
+    train_data <- data[folds[[i]], ]
+    valid_data <- data[-folds[[i]], ]
+    
+    model <- ranger(
+      formula = formula,
+      data = train_data,
+      num.trees = ntree,
+      importance = "impurity"
+    )
+    
+    predictions <- predict(model, data = valid_data)$predictions
+    
+    rmse <- sqrt(mean((valid_data$proportion_correct - predictions)^2))
+    
+    y_mean <- mean(valid_data$proportion_correct)
+    ss_total <- sum((valid_data$proportion_correct - y_mean)^2)
+    ss_residual <- sum((valid_data$proportion_correct - predictions)^2)
+    
+    rsq <- 1 - ss_residual / ss_total
+    
+    cv_results <- rbind(cv_results, data.frame(fold = i, rmse = rmse, rsquared = rsq))
+  }
+  
+  result <- data.frame(
+    rmse = mean(cv_results$rmse),
+    rsquared = mean(cv_results$rsquared)
+  )
+  
+  cat("RF performance - RMSE:", round(result$rmse, 4),
+      "R²:", round(result$rsquared, 4), "\n")
+  
+  return(result)
+}
+```
+
+```{r}
+# define model formulas
+factor_cols <- grep("^Factor", names(item_metrics_with_factors), value = TRUE)
+
+original_vars <- c("test_name", "graph_type", "task_type_merged", "misleading_item", "question_length")
+original_vars_formula <- paste(original_vars, collapse=" + ")
+factors_formula <- paste(factor_cols, collapse = " + ")
+
+modelA_formula <- as.formula(paste("proportion_correct ~", original_vars_formula))
+modelB_formula <- as.formula(paste("proportion_correct ~", factors_formula))
+modelC_formula <- as.formula("proportion_correct ~ cluster")
+# modelD_formula <- as.formula(paste("proportion_correct ~", original_vars_formula, "+", factors_formula))
+modelD_formula <- as.formula(paste("proportion_correct ~", factors_formula))
+# modelE_formula <- as.formula(paste("proportion_correct ~", original_vars_formula, "+ cluster"))
+```
+
+```{r}
+# evaluate models with cv
+set.seed(42)
+cat("Model A: Original Features\n")
+modelA_perf <- cv_performance(modelA_formula, item_metrics_with_clusters, cv_folds)
+
+cat("Model B: Factors Only\n")
+modelB_perf <- cv_performance(modelB_formula, item_metrics_with_clusters, cv_folds)
+
+cat("Model C: Clusters Only\n")
+modelC_perf <- cv_performance(modelC_formula, item_metrics_with_clusters, cv_folds)
+
+# cat("Model D: Original + Factors\n")
+# modelD_perf <- cv_performance(modelD_formula, item_metrics_with_clusters, cv_folds)
+
+cat("Model D: Factors + Clusters \n")
+modelD_perf <- cv_performance(modelD_formula, item_metrics_with_clusters, cv_folds)
+
+# cat("Model F: Linear Regression\n")
+# lm_predictors <- c(original_vars, factor_cols, "cluster")
+# lm_perf <- cv_performance_lm(lm_predictors, "proportion_correct", 
+#                            item_metrics_with_clusters, cv_folds)
+
+cat("Model E: Ridge Regression\n")
+ridge_predictors <- c(original_vars, factor_cols, "cluster")
+ridge_perf <- cv_performance_ridge(ridge_predictors, "proportion_correct", 
+                                   item_metrics_with_clusters, cv_folds)
+
+cat("Model F: Random Forest\n")
+rf_formula <- as.formula(paste("proportion_correct ~", paste(c(original_vars, factor_cols, "cluster"), collapse=" + ")))
+rf_perf <- cv_performance_rf(rf_formula, item_metrics_with_clusters, cv_folds)
+```
+
+```{r}
+# compare models
+all_models_comparison <- data.frame(
+  Model = c("A: Original Features", "B: Factors Only", "C: Clusters Only",
+           "D: Factors + Clusters", "E: Ridge Regression", "F: Random Forest"),
+  
+  RMSE = c(modelA_perf$rmse, modelB_perf$rmse, modelC_perf$rmse,
+         modelD_perf$rmse, ridge_perf$rmse, rf_perf$rmse),
+  
+  R_squared = c(modelA_perf$rsquared, modelB_perf$rsquared, modelC_perf$rsquared,
+              modelD_perf$rsquared, ridge_perf$rsquared, rf_perf$rsquared)
+)
+
+# display
+all_models_comparison <- all_models_comparison %>%
+  mutate(
+    RMSE = round(RMSE, 4),
+    R_squared = round(R_squared, 4)
+  )
+print(all_models_comparison)
+view(all_models_comparison)
+```
+
+```{r}
+all_models_comparison$RMSE
+```
+
+## RQ3: Which combination of features, latent factors, and cluster membership most significantly contribute to predicting the proportion correct on test items?
+
+### Fit Full Model
+
+```{r}
+# best model
+best_model_idx <- which.min(all_models_comparison$RMSE)
+best_model_name <- all_models_comparison$Model[best_model_idx]
+best_model_name
+```
+
+### RF
+
+```{r}
+# prep data for rf
+set.seed(1234)
+rf_formula <- as.formula(paste("proportion_correct ~", paste(c(original_vars, factor_cols, "cluster"), collapse=" + ")))
+
+# tune grid
+tune_grid <- expand.grid(
+  mtry = c(3, 5, 7),
+  min.node.size = c(3, 5),
+  splitrule = "variance"
+)
+
+# cv
+ctrl <- trainControl(method = "cv", number = 5)
+rf_tuned <- train(
+  rf_formula,
+  data = item_metrics_with_clusters,
+  method = "ranger",
+  num.trees = 500,
+  importance = "impurity",
+  tuneGrid = tune_grid,
+  trControl = ctrl
+)
+
+print(rf_tuned)
+best_mtry <- rf_tuned$bestTune$mtry
+best_node_size <- rf_tuned$bestTune$min.node.size
+
+# fit model
+best_model <- ranger(
+  formula = rf_formula,
+  data = item_metrics_with_clusters,
+  num.trees = 500,
+  mtry = best_mtry,
+  min.node.size = best_node_size,
+  importance = "impurity",
+  seed = 1234
+)
+
+print(best_model)
+```
+
+```{r}
+# feature importance
+importance_df <- as.data.frame(importance(best_model))
+importance_df$Variable <- rownames(importance_df)
+colnames(importance_df)[1] <- "Importance"
+importance_df <- importance_df[order(importance_df$Importance, decreasing = TRUE),]
+
+print(head(importance_df, 40))
+```
+
+```{r}
+# feature importance plot
+feature_importance_plot <- ggplot(head(importance_df, 15), 
+                              aes(x = reorder(Variable, Importance), 
+                                  y = Importance)) +
+  geom_col(fill = "darkgrey") +
+  coord_flip() +
+  labs(
+    title = "Random Forest Feature Importance",
+    subtitle = "Based on Mean Decrease in Impurity",
+    x = NULL,
+    y = "Importance Score"
+  ) +
+  theme(aspect.ratio = 0.3,
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+print(feature_importance_plot)
+```
+
+```{r}
+# generate predictions
+predictions <- predict(best_model, data = item_metrics_with_clusters)$predictions
+```
+
+```{r}
+# save model
+saveRDS(best_model, "best_predictive_model_rf.rds")
+saveRDS(prediction_df, "model_predictions_rf.rds")
+```
+
+### If Ridge is Best Model...
+
+```{r}
+set.seed(1234)
+# prep data for ridge regression
+formula_text <- paste("~", paste(ridge_predictors, collapse = " + "))
+x_data <- model.matrix(as.formula(formula_text), item_metrics_with_clusters)[,-1]
+y_data <- item_metrics_with_clusters$proportion_correct
+
+# find optimal lambda
+cv_model <- cv.glmnet(x_data, y_data, alpha = 0)
+best_lambda <- cv_model$lambda.min
+
+# fit model
+best_model <- glmnet(x_data, y_data, alpha = 0, lambda = best_lambda)
+best_model
+```
+
+```{r}
+
+# show top coefficients (excluding intercept)
+coef_df <- as.data.frame(as.matrix(coef(best_model)))
+coef_df$Variable <- rownames(coef_df)
+coef_df <- coef_df[coef_df$Variable != "(Intercept)",]
+colnames(coef_df)[1] <- "Coefficient"
+coef_df <- coef_df[order(abs(coef_df$Coefficient), decreasing = TRUE),]
+
+print(head(coef_df))
+```
+
+```{r}
+
+# feature importance plot (by coefficient magnitude)
+feature_importance_plot <- ggplot(head(coef_df, 15), 
+                               aes(x = reorder(Variable, abs(Coefficient)), 
+                                   y = abs(Coefficient), 
+                                   fill = Coefficient > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("#909090", "#3e3e3e"), 
+                    # values = c("#a7abde", "#f7d379"), 
+                    labels = c("Negative", "Positive"),
+                    name = "Direction") +
+  labs(
+    title = "Ridge Regression Feature Importance by Coefficient Magnitude (Top 15)",
+    subtitle = "Absolute Value of Coefficients (larger = more important)",
+    x = NULL,
+    y = "Absolute Coefficient Value"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+print(feature_importance_plot)
+```
+
+```{r}
+# generate predictions
+predictions <- predict(best_model, newx = x_data, s = best_lambda)[,1]
+```
+
+```{r}
+# save model
+saveRDS(best_model, "best_predictive_model_ridge.rds")
+saveRDS(prediction_df, "model_predictions_ridge.rds")
+
+```
+
+# Kaggle
+
+```{r}
+# kaggle submission
+required_format <- read.csv("Kaggle Mini-Project 1 Submission.csv")
+
+required_item_ids <- required_format$item_id
+
+submission_df <- data.frame(
+  item_id = required_item_ids,
+  proportion_correct = numeric(length(required_item_ids))
+)
+
+# populate predictions
+for (i in 1:nrow(submission_df)) {
+  item <- submission_df$item_id[i]
+  idx <- which(item_metrics_with_clusters$item_id == item)
+  
+  if (length(idx) > 0) {
+    x_for_item <- x_data[idx, , drop = FALSE]
+    submission_df$proportion_correct[i] <- predict(best_model, newx = x_for_item, s = best_lambda)[1]
+  } else {
+    submission_df$proportion_correct[i] <- mean(predictions)
+    cat("warning: item id", item, "not found\n")
+  }
+}
+
+
+write.csv(submission_df, "kaggle_submission_rf.csv", row.names = FALSE)
+head(submission_df)
+```
